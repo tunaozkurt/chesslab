@@ -44,5 +44,14 @@ export async function DELETE(request: NextRequest) {
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
+  // last_sync'i sıfırla ki bir sonraki sync tüm oyunları yeniden çeksin
+  const syncField = platform === 'lichess' ? 'lichess_last_sync' : platform === 'chess.com' ? 'chesscom_last_sync' : null
+  if (syncField) {
+    await supabase
+      .from('user_settings')
+      .update({ [syncField]: null, updated_at: new Date().toISOString() })
+      .eq('user_id', user.id)
+  }
+
   return NextResponse.json({ deleted: gameIds.length })
 }
