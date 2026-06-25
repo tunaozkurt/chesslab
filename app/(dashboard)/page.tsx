@@ -8,7 +8,6 @@ export default async function DashboardPage() {
 
   if (!user) redirect('/login')
 
-  // Temel istatistikleri çek
   const [
     { data: recentGames },
     { data: studyItemsDue },
@@ -20,7 +19,7 @@ export default async function DashboardPage() {
       .select('*')
       .eq('user_id', user.id)
       .order('played_at', { ascending: false })
-      .limit(10),
+      .limit(12),
     supabase
       .from('study_items')
       .select('*')
@@ -41,7 +40,14 @@ export default async function DashboardPage() {
       .eq('analysis_status', 'pending'),
   ])
 
-  const totalGames = recentGames?.length ?? 0
+  const recentGameIds = (recentGames ?? []).map(g => g.id)
+
+  const { data: gameMistakes } = recentGameIds.length > 0
+    ? await supabase
+        .from('mistakes')
+        .select('game_id, centipawn_loss')
+        .in('game_id', recentGameIds)
+    : { data: [] }
 
   return (
     <DashboardContent
@@ -49,6 +55,7 @@ export default async function DashboardPage() {
       studyItemsDue={studyItemsDue ?? []}
       weaknessScores={weaknessScores ?? []}
       pendingAnalysis={pendingAnalysis ?? 0}
+      gameMistakes={gameMistakes ?? []}
     />
   )
 }

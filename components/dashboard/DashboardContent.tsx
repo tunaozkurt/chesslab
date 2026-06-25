@@ -4,19 +4,22 @@ import Link from 'next/link'
 import { Game, StudyItem, WeaknessScore } from '@/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Progress } from '@/components/ui/progress'
 import { Button } from '@/components/ui/button'
 import {
   Trophy, TrendingUp, AlertTriangle, BookOpen,
-  CalendarCheck, Clock, ChevronRight, Upload, Brain
+  CalendarCheck, Clock, ChevronRight, Upload, Brain, Activity,
 } from 'lucide-react'
 import { formatDistanceToNow } from '@/lib/chess/utils'
+import {
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+} from 'recharts'
 
 interface Props {
   recentGames: Game[]
   studyItemsDue: StudyItem[]
   weaknessScores: WeaknessScore[]
   pendingAnalysis: number
+  gameMistakes: { game_id: string; centipawn_loss: number | null }[]
 }
 
 const WEAKNESS_AREAS = [
@@ -56,16 +59,30 @@ function ResultBadge({ result }: { result: string | null }) {
 
 function StudyTypeIcon({ type }: { type: string }) {
   const icons: Record<string, string> = {
-    mistake: '⚠️',
-    repertoire: '📖',
-    endgame: '♚',
-    tactic: '⚔️',
-    concept: '💡',
+    mistake: '⚠️', repertoire: '📖', endgame: '♚', tactic: '⚔️', concept: '💡',
   }
   return <span>{icons[type] ?? '📋'}</span>
 }
 
-export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, pendingAnalysis }: Props) {
+const RESULT_DOT: Record<string, string> = {
+  win: '#22c55e', loss: '#ef4444', draw: '#71717a',
+}
+
+function TrendTooltip({ active, payload, label }: any) {
+  if (!active || !payload?.length) return null
+  const d = payload[0]?.payload
+  return (
+    <div className="bg-zinc-800 border border-zinc-700 rounded-lg p-2.5 text-xs">
+      <p className="text-zinc-200 font-medium mb-1">{d?.label}</p>
+      {d?.avgCp !== null && d?.avgCp !== undefined && (
+        <p className="text-zinc-400">Ort. CP Kayıp: <span className="text-amber-400 font-bold">{d.avgCp}</span></p>
+      )}
+      <p className="text-zinc-500 mt-0.5">{d?.result === 'win' ? '✓ Kazandı' : d?.result === 'loss' ? '✗ Kaybetti' : '= Berabere'}</p>
+    </div>
+  )
+}
+
+export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, pendingAnalysis, gameMistakes }: Props) {
   const wins = recentGames.filter(g => g.result === 'win').length
   const losses = recentGames.filter(g => g.result === 'loss').length
   const draws = recentGames.filter(g => g.result === 'draw').length
@@ -73,6 +90,31 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
   const winRate = total > 0 ? Math.round((wins / total) * 100) : 0
 
   const scoreMap = Object.fromEntries(weaknessScores.map(s => [s.area, s.score]))
+
+  // CP loss per game
+  const cpByGame: Record<string, number[]> = {}
+  for (const m of gameMistakes) {
+    if (m.centipawn_loss === null) continue
+    if (!cpByGame[m.game_id]) cpByGame[m.game_id] = []
+    cpByGame[m.game_id].push(m.centipawn_loss)
+  }
+
+  const trendData = [...recentGames].reverse().slice(-10).map((g, i) => {
+    const arr = cpByGame[g.id]
+    const avgCp = arr?.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : null
+    return {
+      idx: i + 1,
+      avgCp,
+      result: g.result,
+      label: `vs ${g.opponent ?? '?'}`,
+      dot: RESULT_DOT[g.result ?? ''] ?? '#71717a',
+    }
+  })
+
+  const analyzedCount = trendData.filter(d => d.avgCp !== null).length
+  const overallAvgCp = analyzedCount > 0
+    ? Math.round(trendData.filter(d => d.avgCp !== null).reduce((s, d) => s + d.avgCp!, 0) / analyzedCount)
+    : null
 
   return (
     <div className="space-y-6">
@@ -151,17 +193,71 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
         <Card className="bg-zinc-900 border-zinc-800">
           <CardContent className="p-4">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-red-500/20 flex items-center justify-center">
-                <AlertTriangle className="w-4 h-4 text-red-400" />
+              <div className="w-9 h-9 rounded-lg bg-purple-500/20 flex items-center justify-center">
+                <Activity className="w-4 h-4 text-purple-400" />
               </div>
               <div>
-                <p className="text-2xl font-bold text-white">{wins}/{draws}/{losses}</p>
-                <p className="text-zinc-500 text-xs">K / B / M</p>
+                <p className={`text-2xl font-bold ${overallAvgCp === null ? 'text-zinc-600' : overallAvgCp < 50 ? 'text-emerald-400' : overallAvgCp < 80 ? 'text-amber-400' : 'text-red-400'}`}>
+                  {overallAvgCp !== null ? overallAvgCp : '—'}
+                </p>
+                <p className="text-zinc-500 text-xs">Ort. CP Kayıp</p>
               </div>
             </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Performance Trend */}
+      {trendData.length >= 3 && (
+        <Card className="bg-zinc-900 border-zinc-800">
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-white text-sm flex items-center gap-2">
+                <Activity className="w-4 h-4 text-purple-400" />
+                Performans Trendi
+              </CardTitle>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />K</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500 inline-block" />M</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-zinc-500 inline-block" />B</span>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <ResponsiveContainer width="100%" height={140}>
+              <LineChart data={trendData} margin={{ top: 8, right: 8, bottom: 0, left: -20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                <XAxis dataKey="idx" tick={{ fill: '#52525b', fontSize: 10 }} />
+                <YAxis tick={{ fill: '#52525b', fontSize: 10 }} domain={[0, 'dataMax + 20']} />
+                <Tooltip content={<TrendTooltip />} />
+                <Line
+                  type="monotone"
+                  dataKey="avgCp"
+                  stroke="#a78bfa"
+                  strokeWidth={2}
+                  dot={(props) => {
+                    const { cx, cy, payload } = props
+                    return (
+                      <circle
+                        key={payload.idx}
+                        cx={cx}
+                        cy={cy}
+                        r={4}
+                        fill={payload.dot}
+                        stroke="#18181b"
+                        strokeWidth={1.5}
+                      />
+                    )
+                  }}
+                  connectNulls={false}
+                  name="CP Kayıp"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="text-zinc-600 text-xs mt-1 text-center">Düşük CP kayıp = daha iyi oynama</p>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Today's Study Queue */}
@@ -205,7 +301,7 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
                 </ul>
               )}
               {studyItemsDue.length > 0 && (
-                <Link href="/study/session">
+                <Link href="/study">
                   <Button className="w-full mt-4 bg-amber-500 hover:bg-amber-400 text-black font-semibold">
                     Çalışmaya Başla
                   </Button>
@@ -240,30 +336,37 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
                 </div>
               ) : (
                 <ul className="space-y-1">
-                  {recentGames.slice(0, 8).map((game) => (
-                    <li key={game.id}>
-                      <Link
-                        href={`/games/${game.id}`}
-                        className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-zinc-800 transition-colors group"
-                      >
-                        <span className="text-lg">{game.user_color === 'white' ? '♔' : '♚'}</span>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-white text-sm truncate">
-                            vs {game.opponent ?? 'Bilinmiyor'}
-                          </p>
-                          <p className="text-zinc-500 text-xs truncate">
-                            {game.opening_name ?? game.eco_code ?? 'Açılış bilinmiyor'}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <ResultBadge result={game.result} />
-                          {game.analysis_status === 'pending' && (
-                            <span className="text-xs text-zinc-600">analiz bekleniyor</span>
-                          )}
-                        </div>
-                      </Link>
-                    </li>
-                  ))}
+                  {recentGames.slice(0, 8).map((game) => {
+                    const arr = cpByGame[game.id]
+                    const avgCp = arr?.length ? Math.round(arr.reduce((s, v) => s + v, 0) / arr.length) : null
+                    return (
+                      <li key={game.id}>
+                        <Link
+                          href={`/games/${game.id}`}
+                          className="flex items-center gap-3 p-2.5 rounded-lg hover:bg-zinc-800 transition-colors group"
+                        >
+                          <span className="text-lg">{game.user_color === 'white' ? '♔' : '♚'}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-white text-sm truncate">vs {game.opponent ?? 'Bilinmiyor'}</p>
+                            <p className="text-zinc-500 text-xs truncate">
+                              {game.opening_name ?? game.eco_code ?? 'Açılış bilinmiyor'}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {avgCp !== null && (
+                              <span className={`text-xs font-mono ${avgCp < 50 ? 'text-emerald-400' : avgCp < 80 ? 'text-amber-400' : 'text-red-400'}`}>
+                                {avgCp}cp
+                              </span>
+                            )}
+                            <ResultBadge result={game.result} />
+                            {game.analysis_status === 'pending' && (
+                              <span className="text-xs text-zinc-600">analiz bekleniyor</span>
+                            )}
+                          </div>
+                        </Link>
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
             </CardContent>
@@ -294,18 +397,12 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
                         <span className="text-zinc-600 text-xs">—</span>
                       )}
                     </div>
-                    {score !== null ? (
-                      <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-                        <div
-                          className={`h-full rounded-full transition-all ${getScoreBarColor(score)}`}
-                          style={{ width: `${score}%` }}
-                        />
-                      </div>
-                    ) : (
-                      <div className="h-1.5 bg-zinc-800 rounded-full">
-                        <div className="h-full w-0 bg-zinc-700 rounded-full" />
-                      </div>
-                    )}
+                    <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${score !== null ? getScoreBarColor(score) : ''}`}
+                        style={{ width: score !== null ? `${score}%` : '0%' }}
+                      />
+                    </div>
                   </div>
                 )
               })}
@@ -314,6 +411,11 @@ export function DashboardContent({ recentGames, studyItemsDue, weaknessScores, p
                   Oyun analizi tamamlandıkça skorlar hesaplanacak.
                 </p>
               )}
+              <Link href="/reports">
+                <Button variant="outline" size="sm" className="w-full mt-2 border-zinc-700 text-zinc-400 hover:text-white text-xs">
+                  Tüm Raporu Gör
+                </Button>
+              </Link>
             </CardContent>
           </Card>
         </div>

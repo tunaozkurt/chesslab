@@ -1,18 +1,22 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
+import { SettingsContent } from '@/components/settings/SettingsContent'
 
-export default async function Page() {
+export default async function SettingsPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
+  const { data: settings } = await supabase
+    .from('user_settings')
+    .select('*')
+    .eq('user_id', user.id)
+    .single()
+
   return (
-    <div className="flex items-center justify-center min-h-96">
-      <div className="text-center">
-        <div className="text-5xl mb-4">🚧</div>
-        <h2 className="text-white text-lg font-semibold">Yakında</h2>
-        <p className="text-zinc-500 text-sm mt-1">Bu modül sonraki sprintlerde gelecek.</p>
-      </div>
-    </div>
+    <SettingsContent
+      settings={settings}
+      userEmail={user.email ?? ''}
+    />
   )
 }
