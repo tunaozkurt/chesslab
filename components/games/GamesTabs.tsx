@@ -22,10 +22,17 @@ interface Props {
   initialGames: Game[]
 }
 
+const PLATFORM_KEY: Partial<Record<Tab, string>> = {
+  lichess: 'lichess',
+  chesscom: 'chess.com',
+  otb: 'OTB (Masa başı)',
+}
+
 export function GamesTabs({ initialGames }: Props) {
   const [games, setGames] = useState(initialGames)
   const [activeTab, setActiveTab] = useState<Tab>('all')
   const [deleting, setDeleting] = useState<string | null>(null)
+  const [deletingAll, setDeletingAll] = useState(false)
 
   const filtered = TABS.find(t => t.id === activeTab)!.filter
   const visible = games.filter(filtered)
@@ -45,6 +52,26 @@ export function GamesTabs({ initialGames }: Props) {
       toast.error((err as Error).message)
     } finally {
       setDeleting(null)
+    }
+  }
+
+  async function handleDeleteAll() {
+    const platform = PLATFORM_KEY[activeTab]
+    if (!platform) return
+    const count = visible.length
+    if (!confirm(`Bu sekmedeki ${count} oyunun tamamı silinecek. Emin misin?`)) return
+
+    setDeletingAll(true)
+    try {
+      const res = await fetch(`/api/games?platform=${encodeURIComponent(platform)}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? 'Silinemedi')
+      setGames(prev => prev.filter(g => !filtered(g)))
+      toast.success(`${data.deleted} oyun silindi`)
+    } catch (err) {
+      toast.error((err as Error).message)
+    } finally {
+      setDeletingAll(false)
     }
   }
 
@@ -75,14 +102,28 @@ export function GamesTabs({ initialGames }: Props) {
         })}
       </div>
 
-      {/* OTB sekme için extra buton */}
-      {activeTab === 'otb' && (
-        <Link href="/games/upload">
-          <Button variant="outline" className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 gap-2 text-sm">
-            <Upload className="w-4 h-4" />
-            Manuel Oyun Ekle
+      {/* Sekme aksiyonları */}
+      {activeTab !== 'all' && visible.length > 0 && (
+        <div className="flex gap-2">
+          {activeTab === 'otb' && (
+            <Link href="/games/upload">
+              <Button variant="outline" className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 gap-2 text-sm">
+                <Upload className="w-4 h-4" />
+                Manuel Oyun Ekle
+              </Button>
+            </Link>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={deletingAll}
+            onClick={handleDeleteAll}
+            className="border-red-900/50 text-red-500 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/50 gap-2 text-sm"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            {deletingAll ? 'Siliniyor...' : `Tümünü Sil (${visible.length})`}
           </Button>
-        </Link>
+        </div>
       )}
 
       {/* Tablo veya boş durum */}
