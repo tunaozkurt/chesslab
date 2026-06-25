@@ -11,7 +11,7 @@ interface Props {
   chesscomLastSync: string | null
 }
 
-const COOLDOWN_MS = 5 * 60 * 1000 // 5 dakika
+const COOLDOWN_MS = 10 * 60 * 1000 // 10 dakika
 
 function needsSync(lastSync: string | null): boolean {
   if (!lastSync) return true
@@ -42,8 +42,11 @@ export function AutoSync({ lichessUsername, chesscomUsername, lichessLastSync, c
             const data = await res.json()
             totalImported += data.imported ?? 0
           }
-        } catch {
-          // sessizce geç
+        } catch (err) {
+          const msg = (err as Error).message
+          if (msg.includes('429') || msg.includes('limit')) {
+            toast.warning('Lichess istek limiti: birkaç dakika sonra tekrar dene')
+          }
         }
       }
 

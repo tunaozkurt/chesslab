@@ -15,13 +15,15 @@ function splitPGNs(raw: string): string[] {
 }
 
 async function fetchLichess(username: string, since?: Date): Promise<string[]> {
-  let url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?clocks=false&evals=false`
-  // since parametresi varsa sadece yeni oyunları çek, yoksa tüm oyunları al
+  // İlk sync: son 200 oyun. Sonraki sync'ler: since ile sadece yeniler (max 500)
+  const max = since ? 500 : 200
+  let url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?clocks=false&evals=false&max=${max}`
   if (since) url += `&since=${since.getTime()}`
 
   const res = await fetch(url, { headers: { Accept: 'application/x-chess-pgn' } })
   if (!res.ok) {
     if (res.status === 404) throw new Error('Lichess kullanıcı bulunamadı')
+    if (res.status === 429) throw new Error('Lichess istek limiti aşıldı, birkaç dakika bekleyip tekrar dene')
     throw new Error(`Lichess API hatası: ${res.status}`)
   }
   return splitPGNs(await res.text())
