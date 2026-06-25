@@ -6,7 +6,8 @@ export const maxDuration = 60
 
 function splitPGNs(raw: string): string[] {
   const games: string[] = []
-  const parts = raw.split(/\n\n(?=\[Event)/)
+  // \r\n veya \n ile ayrılmış PGN bloklarını ayır
+  const parts = raw.split(/\r?\n\r?\n(?=\[Event)/)
   for (const part of parts) {
     const trimmed = part.trim()
     if (trimmed.startsWith('[')) games.push(trimmed)
@@ -15,7 +16,6 @@ function splitPGNs(raw: string): string[] {
 }
 
 async function fetchLichess(username: string, since?: Date): Promise<string[]> {
-  // İlk sync: son 200 oyun. Sonraki sync'ler: since ile sadece yeniler (max 500)
   const max = since ? 500 : 200
   let url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?clocks=false&evals=false&max=${max}`
   if (since) url += `&since=${since.getTime()}`
@@ -26,7 +26,9 @@ async function fetchLichess(username: string, since?: Date): Promise<string[]> {
     if (res.status === 429) throw new Error('Lichess istek limiti aşıldı, birkaç dakika bekleyip tekrar dene')
     throw new Error(`Lichess API hatası: ${res.status}`)
   }
-  return splitPGNs(await res.text())
+  const text = await res.text()
+  if (!text.trim()) return []
+  return splitPGNs(text)
 }
 
 async function fetchChessCom(username: string, since?: Date): Promise<string[]> {
@@ -41,7 +43,6 @@ async function fetchChessCom(username: string, since?: Date): Promise<string[]> 
   const { archives } = (await archivesRes.json()) as { archives: string[] }
   if (!archives?.length) return []
 
-  // since varsa, o tarihten önceki arşivleri atla
   const sinceYear = since ? since.getFullYear() : 0
   const sinceMonth = since ? since.getMonth() + 1 : 0
   const sinceTs = since ? Math.floor(since.getTime() / 1000) : 0
@@ -49,7 +50,6 @@ async function fetchChessCom(username: string, since?: Date): Promise<string[]> 
   const pgns: string[] = []
 
   for (const archiveUrl of archives.reverse()) {
-    // URL formatı: .../games/2024/03 → yıl ve ay filtresi
     const match = archiveUrl.match(/\/(\d{4})\/(\d{2})$/)
     if (match && since) {
       const year = parseInt(match[1])
@@ -63,7 +63,6 @@ async function fetchChessCom(username: string, since?: Date): Promise<string[]> 
 
     for (const game of (data.games ?? []).reverse()) {
       if (!game.pgn) continue
-      // since kontrolü: end_time timestamp ile karşılaştır
       if (sinceTs && game.end_time && game.end_time <= sinceTs) continue
       pgns.push(game.pgn)
     }
@@ -72,15 +71,32 @@ async function fetchChessCom(username: string, since?: Date): Promise<string[]> 
   return pgns
 }
 
+// DELETE /api/sync → last_sync'i sıfırla (force re-sync için)
+export async function DELETE(request: NextRequest) {
+  const platform = request.nextUrl.searchParams.get('platform')
+  if (!platform) return NextResponse.json({ error: 'platform gerekli' }, { status: 400 })
+
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const field = platform === 'lichess' ? 'lichess_last_sync' : 'chesscom_last_sync'
+  await supabase
+    .from('user_settings')
+    .update({ [field]: null, updated_at: new Date().toISOString() })
+    .eq('user_id', user.id)
+
+  return NextResponse.json({ ok: true })
+}
+
 export async function POST(request: NextRequest) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const body = (await request.json()) as { platform: 'lichess' | 'chesscom' }
-  const { platform } = body
+  const body = (await request.json()) as { platform: 'lichess' | 'chesscom'; force?: boolean }
+  const { platform, force = false } = body
 
-  // Kullanıcı ayarlarından bağlı hesap bilgilerini al
   const { data: settings } = await supabase
     .from('user_settings')
     .select('lichess_username, chesscom_username, lichess_last_sync, chesscom_last_sync')
@@ -90,7 +106,7 @@ export async function POST(request: NextRequest) {
   const username = platform === 'lichess' ? settings?.lichess_username : settings?.chesscom_username
   if (!username) return NextResponse.json({ error: 'Bu platform için hesap bağlı değil' }, { status: 400 })
 
-  // O platformdan hiç oyun yoksa last_sync'i yok say → baştan çek
+  // O platformdan kaç oyun var?
   const { count: gameCount } = await supabase
     .from('games')
     .select('id', { count: 'exact', head: true })
@@ -98,7 +114,10 @@ export async function POST(request: NextRequest) {
     .eq('platform', platform === 'lichess' ? 'lichess' : 'chess.com')
 
   const lastSyncStr = platform === 'lichess' ? settings?.lichess_last_sync : settings?.chesscom_last_sync
-  const lastSync = (lastSyncStr && (gameCount ?? 0) > 0) ? new Date(lastSyncStr) : undefined
+  // Oyun yoksa veya force=true ise last_sync'i yok say
+  const lastSync = (!force && (gameCount ?? 0) > 0 && lastSyncStr)
+    ? new Date(lastSyncStr)
+    : undefined
 
   let rawPgns: string[] = []
   try {
@@ -109,15 +128,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (rawPgns.length === 0) {
-    // Sync zamanını yine de güncelle
     await supabase.from('user_settings').update({
       [`${platform}_last_sync`]: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }).eq('user_id', user.id)
-    return NextResponse.json({ imported: 0, skipped: 0 })
+    return NextResponse.json({ imported: 0, skipped: 0, total: 0, gameCount: gameCount ?? 0 })
   }
 
-  // Mevcut oyunları tek sorguda al — played_at + opponent kombinasyonuyla dedup
   const { data: existingGames } = await supabase
     .from('games')
     .select('played_at, opponent')
@@ -132,13 +149,13 @@ export async function POST(request: NextRequest) {
 
   let imported = 0
   let skipped = 0
+  let parseFailures = 0
   const allMoves: Array<ReturnType<typeof extractMoves>[0] & { game_id: string }> = []
 
   for (const pgn of rawPgns) {
     const parsed = parsePGN(pgn, username)
-    if (!parsed) { skipped++; continue }
+    if (!parsed) { parseFailures++; skipped++; continue }
 
-    // played_at + opponent kombinasyonu varsa aynı oyun → atla
     const key = `${parsed.played_at ?? ''}|${(parsed.opponent ?? '').toLowerCase()}`
     if (parsed.played_at && existingKeys.has(key)) { skipped++; continue }
 
@@ -170,17 +187,15 @@ export async function POST(request: NextRequest) {
     imported++
   }
 
-  // Hamleleri toplu ekle (500'lük parçalar halinde)
   const CHUNK = 500
   for (let i = 0; i < allMoves.length; i += CHUNK) {
     await supabase.from('moves').insert(allMoves.slice(i, i + CHUNK))
   }
 
-  // Son sync zamanını güncelle
   await supabase.from('user_settings').update({
     [`${platform}_last_sync`]: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   }).eq('user_id', user.id)
 
-  return NextResponse.json({ imported, skipped })
+  return NextResponse.json({ imported, skipped, total: rawPgns.length, parseFailures, gameCount: gameCount ?? 0 })
 }

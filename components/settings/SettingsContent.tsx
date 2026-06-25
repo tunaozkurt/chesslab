@@ -72,19 +72,24 @@ export function SettingsContent({ settings, userEmail }: Props) {
     setSaving(false)
   }
 
-  async function handleSync(platform: 'lichess' | 'chesscom') {
+  async function handleSync(platform: 'lichess' | 'chesscom', force = false) {
     const username = platform === 'lichess' ? form.lichess_username : form.chesscom_username
     if (!username?.trim()) {
       toast.error('Önce kullanıcı adı gir ve kaydet')
       return
     }
 
-    // Önce ayarları kaydet (kullanıcı adı DB'de olmalı)
+    // Önce ayarları kaydet
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(form),
     })
+
+    // Force ise önce last_sync'i sıfırla
+    if (force) {
+      await fetch(`/api/sync?platform=${platform}`, { method: 'DELETE' })
+    }
 
     setSyncing(platform)
     const label = platform === 'lichess' ? 'Lichess' : 'Chess.com'
@@ -94,7 +99,7 @@ export function SettingsContent({ settings, userEmail }: Props) {
       const res = await fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform }),
+        body: JSON.stringify({ platform, force }),
       })
       const data = await res.json()
 
@@ -104,15 +109,14 @@ export function SettingsContent({ settings, userEmail }: Props) {
       }
 
       const now = new Date().toISOString()
-      setForm(f => ({
-        ...f,
-        [`${platform}_last_sync`]: now,
-      }))
+      setForm(f => ({ ...f, [`${platform}_last_sync`]: now }))
 
       if (data.imported > 0) {
         toast.success(`${data.imported} oyun eklendi!`, { id: 'sync' })
+      } else if (data.total === 0) {
+        toast.warning(`Platform'dan oyun gelmedi (DB'deki: ${data.gameCount})`, { id: 'sync' })
       } else {
-        toast.success('Zaten güncel, yeni oyun yok.', { id: 'sync' })
+        toast.info(`${data.total} oyun kontrol edildi, ${data.skipped} zaten mevcut (parse hatası: ${data.parseFailures ?? 0})`, { id: 'sync' })
       }
     } catch {
       toast.error('Bağlantı hatası', { id: 'sync' })
@@ -164,9 +168,20 @@ export function SettingsContent({ settings, userEmail }: Props) {
                 disabled={syncing === 'lichess' || !form.lichess_username?.trim()}
                 onClick={() => handleSync('lichess')}
                 className="border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-white shrink-0"
-                title="Şimdi senkronize et"
+                title="Yeni oyunları çek"
               >
                 <RefreshCw className={`w-4 h-4 ${syncing === 'lichess' ? 'animate-spin' : ''}`} />
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={syncing === 'lichess' || !form.lichess_username?.trim()}
+                onClick={() => handleSync('lichess', true)}
+                className="border-zinc-700 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 shrink-0 text-xs px-2"
+                title="Sıfırla ve baştan çek"
+              >
+                Sıfırla
               </Button>
             </div>
             {form.lichess_username && (
