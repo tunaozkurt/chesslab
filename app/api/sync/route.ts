@@ -6,7 +6,6 @@ export const maxDuration = 60
 
 function splitPGNs(raw: string): string[] {
   const games: string[] = []
-  // \r\n veya \n ile ayrılmış PGN bloklarını ayır
   const parts = raw.split(/\r?\n\r?\n(?=\[Event)/)
   for (const part of parts) {
     const trimmed = part.trim()
@@ -16,7 +15,8 @@ function splitPGNs(raw: string): string[] {
 }
 
 async function fetchLichess(username: string, since?: Date): Promise<string[]> {
-  const max = since ? 500 : 200
+  // İlk sync: 50, sonraki: 200 (Vercel free tier 10s timeout'a uygun)
+  const max = since ? 200 : 50
   let url = `https://lichess.org/api/games/user/${encodeURIComponent(username)}?clocks=false&evals=false&max=${max}`
   if (since) url += `&since=${since.getTime()}`
 
@@ -66,12 +66,14 @@ async function fetchChessCom(username: string, since?: Date): Promise<string[]> 
       if (sinceTs && game.end_time && game.end_time <= sinceTs) continue
       pgns.push(game.pgn)
     }
+
+    if (!since && pgns.length >= 50) break // ilk sync'te yeterli
   }
 
-  return pgns
+  return pgns.slice(0, since ? 200 : 50)
 }
 
-// DELETE /api/sync → last_sync'i sıfırla (force re-sync için)
+// DELETE /api/sync?platform=lichess → last_sync sıfırla
 export async function DELETE(request: NextRequest) {
   const platform = request.nextUrl.searchParams.get('platform')
   if (!platform) return NextResponse.json({ error: 'platform gerekli' }, { status: 400 })
@@ -106,7 +108,6 @@ export async function POST(request: NextRequest) {
   const username = platform === 'lichess' ? settings?.lichess_username : settings?.chesscom_username
   if (!username) return NextResponse.json({ error: 'Bu platform için hesap bağlı değil' }, { status: 400 })
 
-  // O platformdan kaç oyun var?
   const { count: gameCount } = await supabase
     .from('games')
     .select('id', { count: 'exact', head: true })
@@ -114,7 +115,6 @@ export async function POST(request: NextRequest) {
     .eq('platform', platform === 'lichess' ? 'lichess' : 'chess.com')
 
   const lastSyncStr = platform === 'lichess' ? settings?.lichess_last_sync : settings?.chesscom_last_sync
-  // Oyun yoksa veya force=true ise last_sync'i yok say
   const lastSync = (!force && (gameCount ?? 0) > 0 && lastSyncStr)
     ? new Date(lastSyncStr)
     : undefined
@@ -135,6 +135,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ imported: 0, skipped: 0, total: 0, gameCount: gameCount ?? 0 })
   }
 
+  // Mevcut oyunların played_at+opponent setini al (dedup için)
   const { data: existingGames } = await supabase
     .from('games')
     .select('played_at, opponent')
@@ -147,44 +148,64 @@ export async function POST(request: NextRequest) {
       .map(g => `${g.played_at}|${(g.opponent ?? '').toLowerCase()}`)
   )
 
-  let imported = 0
-  let skipped = 0
+  // Tüm PGN'leri parse et, yenileri filtrele
+  type ParsedEntry = { pgn: string; data: ReturnType<typeof parsePGN> & {} }
+  const toInsert: { pgn: string; parsed: NonNullable<ReturnType<typeof parsePGN>> }[] = []
   let parseFailures = 0
-  const allMoves: Array<ReturnType<typeof extractMoves>[0] & { game_id: string }> = []
 
   for (const pgn of rawPgns) {
     const parsed = parsePGN(pgn, username)
-    if (!parsed) { parseFailures++; skipped++; continue }
-
+    if (!parsed) { parseFailures++; continue }
     const key = `${parsed.played_at ?? ''}|${(parsed.opponent ?? '').toLowerCase()}`
-    if (parsed.played_at && existingKeys.has(key)) { skipped++; continue }
+    if (parsed.played_at && existingKeys.has(key)) continue
+    toInsert.push({ pgn, parsed })
+  }
 
-    const { data: game, error } = await supabase
-      .from('games')
-      .insert({
-        user_id: user.id,
-        pgn,
-        platform: platform === 'lichess' ? 'lichess' : 'chess.com',
-        opponent: parsed.opponent,
-        played_at: parsed.played_at,
-        time_control: parsed.time_control,
-        user_color: parsed.user_color,
-        result: parsed.result,
-        opening_name: parsed.opening_name,
-        eco_code: parsed.eco_code,
-        total_moves: parsed.total_moves,
-        analysis_status: 'pending',
-      })
-      .select('id')
-      .single()
+  if (toInsert.length === 0) {
+    await supabase.from('user_settings').update({
+      [`${platform}_last_sync`]: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('user_id', user.id)
+    return NextResponse.json({
+      imported: 0,
+      skipped: rawPgns.length - parseFailures,
+      total: rawPgns.length,
+      parseFailures,
+      gameCount: gameCount ?? 0,
+    })
+  }
 
-    if (error || !game) { skipped++; continue }
+  // Toplu insert — tek sorguda tüm oyunları ekle
+  const platformStr = platform === 'lichess' ? 'lichess' : 'chess.com'
+  const gamesData = toInsert.map(({ pgn, parsed }) => ({
+    user_id: user.id,
+    pgn,
+    platform: platformStr,
+    opponent: parsed.opponent,
+    played_at: parsed.played_at,
+    time_control: parsed.time_control,
+    user_color: parsed.user_color,
+    result: parsed.result,
+    opening_name: parsed.opening_name,
+    eco_code: parsed.eco_code,
+    total_moves: parsed.total_moves,
+    analysis_status: 'pending',
+  }))
 
-    if (parsed.played_at) existingKeys.add(key)
+  const { data: insertedGames, error: insertError } = await supabase
+    .from('games')
+    .insert(gamesData)
+    .select('id')
 
-    const moves = extractMoves(pgn).map(m => ({ ...m, game_id: game.id }))
+  if (insertError || !insertedGames) {
+    return NextResponse.json({ error: insertError?.message ?? 'Insert hatası' }, { status: 500 })
+  }
+
+  // Hamleleri toplu extract et ve toplu insert yap
+  const allMoves: object[] = []
+  for (let i = 0; i < insertedGames.length; i++) {
+    const moves = extractMoves(toInsert[i].pgn).map(m => ({ ...m, game_id: insertedGames[i].id }))
     allMoves.push(...moves)
-    imported++
   }
 
   const CHUNK = 500
@@ -197,5 +218,11 @@ export async function POST(request: NextRequest) {
     updated_at: new Date().toISOString(),
   }).eq('user_id', user.id)
 
-  return NextResponse.json({ imported, skipped, total: rawPgns.length, parseFailures, gameCount: gameCount ?? 0 })
+  return NextResponse.json({
+    imported: insertedGames.length,
+    skipped: rawPgns.length - toInsert.length - parseFailures,
+    total: rawPgns.length,
+    parseFailures,
+    gameCount: gameCount ?? 0,
+  })
 }
