@@ -90,8 +90,15 @@ export async function POST(request: NextRequest) {
   const username = platform === 'lichess' ? settings?.lichess_username : settings?.chesscom_username
   if (!username) return NextResponse.json({ error: 'Bu platform için hesap bağlı değil' }, { status: 400 })
 
+  // O platformdan hiç oyun yoksa last_sync'i yok say → baştan çek
+  const { count: gameCount } = await supabase
+    .from('games')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', user.id)
+    .eq('platform', platform === 'lichess' ? 'lichess' : 'chess.com')
+
   const lastSyncStr = platform === 'lichess' ? settings?.lichess_last_sync : settings?.chesscom_last_sync
-  const lastSync = lastSyncStr ? new Date(lastSyncStr) : undefined
+  const lastSync = (lastSyncStr && (gameCount ?? 0) > 0) ? new Date(lastSyncStr) : undefined
 
   let rawPgns: string[] = []
   try {
