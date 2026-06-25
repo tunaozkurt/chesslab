@@ -29,26 +29,33 @@ export function parsePGN(pgn: string, userEmail?: string): ParsedGame | null {
     let opponent: string | null = null
 
     if (userEmail) {
-      const emailLower = userEmail.toLowerCase()
-      if (whitePlayer.toLowerCase().includes(emailLower)) {
+      const userLower = userEmail.toLowerCase()
+      if (whitePlayer.toLowerCase() === userLower || whitePlayer.toLowerCase().includes(userLower)) {
         userColor = 'white'
         opponent = blackPlayer || null
-      } else if (blackPlayer.toLowerCase().includes(emailLower)) {
+      } else if (blackPlayer.toLowerCase() === userLower || blackPlayer.toLowerCase().includes(userLower)) {
         userColor = 'black'
         opponent = whitePlayer || null
       }
     }
 
     let result: GameResult | null = null
-    if (resultStr === '1-0') result = userColor === 'white' ? 'win' : 'loss'
-    else if (resultStr === '0-1') result = userColor === 'black' ? 'win' : 'loss'
-    else if (resultStr === '1/2-1/2') result = 'draw'
+    if (userColor) {
+      if (resultStr === '1-0') result = userColor === 'white' ? 'win' : 'loss'
+      else if (resultStr === '0-1') result = userColor === 'black' ? 'win' : 'loss'
+      else if (resultStr === '1/2-1/2') result = 'draw'
+    } else {
+      if (resultStr === '1/2-1/2') result = 'draw'
+    }
 
-    const dateStr = headers['Date']
+    // UTCDate + UTCTime (Lichess ve Chess.com her ikisinde de var) → kesin timestamp
+    const utcDate = headers['UTCDate'] ?? headers['Date']
+    const utcTime = headers['UTCTime'] ?? headers['StartTime']
     let played_at: string | null = null
-    if (dateStr && dateStr !== '????.??.??') {
-      const cleaned = dateStr.replace(/\?/g, '01')
-      const date = new Date(cleaned)
+    if (utcDate && utcDate !== '????.??.??') {
+      const cleanDate = utcDate.replace(/\?/g, '01').replace(/\./g, '-')
+      const dateTimeStr = utcTime ? `${cleanDate}T${utcTime}Z` : cleanDate
+      const date = new Date(dateTimeStr)
       if (!isNaN(date.getTime())) played_at = date.toISOString()
     }
 

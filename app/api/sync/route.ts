@@ -110,13 +110,18 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ imported: 0, skipped: 0 })
   }
 
-  // Mevcut played_at değerlerini tek sorguda al (deduplication için)
+  // Mevcut oyunları tek sorguda al — played_at + opponent kombinasyonuyla dedup
   const { data: existingGames } = await supabase
     .from('games')
-    .select('played_at')
+    .select('played_at, opponent')
     .eq('user_id', user.id)
+    .eq('platform', platform === 'lichess' ? 'lichess' : 'chess.com')
 
-  const existingDates = new Set((existingGames ?? []).map(g => g.played_at).filter(Boolean))
+  const existingKeys = new Set(
+    (existingGames ?? [])
+      .filter(g => g.played_at)
+      .map(g => `${g.played_at}|${(g.opponent ?? '').toLowerCase()}`)
+  )
 
   let imported = 0
   let skipped = 0
@@ -126,7 +131,9 @@ export async function POST(request: NextRequest) {
     const parsed = parsePGN(pgn, username)
     if (!parsed) { skipped++; continue }
 
-    if (parsed.played_at && existingDates.has(parsed.played_at)) { skipped++; continue }
+    // played_at + opponent kombinasyonu varsa aynı oyun → atla
+    const key = `${parsed.played_at ?? ''}|${(parsed.opponent ?? '').toLowerCase()}`
+    if (parsed.played_at && existingKeys.has(key)) { skipped++; continue }
 
     const { data: game, error } = await supabase
       .from('games')
@@ -149,7 +156,7 @@ export async function POST(request: NextRequest) {
 
     if (error || !game) { skipped++; continue }
 
-    if (parsed.played_at) existingDates.add(parsed.played_at)
+    if (parsed.played_at) existingKeys.add(key)
 
     const moves = extractMoves(pgn).map(m => ({ ...m, game_id: game.id }))
     allMoves.push(...moves)
