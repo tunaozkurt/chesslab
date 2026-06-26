@@ -15,10 +15,22 @@ const STOCKFISH_PATH = path.join(
 )
 
 function parseInfoLine(line: string): { evalCp: number; pv: string | null } | null {
-  // Only parse final depth lines
+  // Aspiration window bounds are unreliable — skip them
+  if (line.includes('lowerbound') || line.includes('upperbound')) return null
+
+  let evalCp: number
   const cpMatch = line.match(/score cp (-?\d+)/)
-  if (!cpMatch) return null
-  const evalCp = parseInt(cpMatch[1], 10)
+  const mateMatch = line.match(/score mate (-?\d+)/)
+
+  if (cpMatch) {
+    evalCp = parseInt(cpMatch[1], 10)
+  } else if (mateMatch) {
+    const mateIn = parseInt(mateMatch[1], 10)
+    evalCp = mateIn > 0 ? 30000 : -30000
+  } else {
+    return null
+  }
+
   const pvMatch = line.match(/ pv (.+)/)
   return { evalCp, pv: pvMatch ? pvMatch[1].trim() : null }
 }
@@ -36,6 +48,7 @@ export async function analyzePosition(
     let bestPv: string | null = null
     let bestMove: string | null = null
     let settled = false
+    let uciReady = false
 
     const timeout = setTimeout(() => {
       if (!settled) {
@@ -51,7 +64,20 @@ export async function analyzePosition(
         const trimmed = line.trim()
         if (!trimmed) continue
 
-        if (trimmed.startsWith('info') && trimmed.includes('score cp')) {
+        // UCI handshake
+        if (trimmed === 'uciok') {
+          proc.stdin!.write('isready\n')
+          continue
+        }
+
+        if (trimmed === 'readyok' && !uciReady) {
+          uciReady = true
+          proc.stdin!.write(`position fen ${fen}\n`)
+          proc.stdin!.write(`go depth ${depth}\n`)
+          continue
+        }
+
+        if (trimmed.startsWith('info') && (trimmed.includes('score cp') || trimmed.includes('score mate'))) {
           const parsed = parseInfoLine(trimmed)
           if (parsed) {
             bestEval = parsed.evalCp
@@ -82,8 +108,8 @@ export async function analyzePosition(
       }
     })
 
-    proc.stdin!.write(`position fen ${fen}\n`)
-    proc.stdin!.write(`go depth ${depth}\n`)
+    // Start UCI handshake — position/go are sent after readyok
+    proc.stdin!.write('uci\n')
   })
 }
 
