@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
-import { analyzePosition, classifyLoss, detectPhase, evalFromWhite } from '@/lib/stockfish/engine'
+import { analyzeGame, classifyLoss, detectPhase } from '@/lib/stockfish/engine'
 import { Chess } from 'chess.js'
 
 // Vercel Pro: 300s max. Free tier: 10s (analysis will timeout for long games on free)
 export const maxDuration = 300
 
-// Depth 12 = ~0.1-0.3s/position → 40 moves ≈ 10-15s total
-// Depth 16 = ~0.5-2s/position → 40 moves ≈ 20-80s total (local dev recommended)
-const ANALYSIS_DEPTH = parseInt(process.env.STOCKFISH_DEPTH ?? '12')
+// 100 ms/position → 80 positions ≈ 8 s total (single process, no spawn overhead)
+// Override with STOCKFISH_MOVETIME env var (e.g. 200 for deeper analysis)
+const MOVETIME_MS = parseInt(process.env.STOCKFISH_MOVETIME ?? '100')
 
 interface Params {
   params: Promise<{ id: string }>
@@ -72,10 +72,13 @@ export async function POST(request: NextRequest, { params }: Params) {
       return NextResponse.json({ error: 'No moves found' }, { status: 400 })
     }
 
-    // Analyze each position: we need eval at fen_before for each move
-    // Then centipawn_loss = evalFromWhite(before, colorToMove) - evalFromWhite(after, opponentColor)
-    // But simpler: analyze each fen_before, get "best eval" from side-to-move perspective
-    // eval_after = next move's eval_before (opponent's perspective) → convert to same player's perspective
+    // Build FEN list: fen_before for every move, plus the final fen_after.
+    // analyzeGame runs a single Stockfish process for all positions — much faster.
+    const fens = [
+      ...moves.map(m => m.fen_before),
+      moves[moves.length - 1].fen_after,
+    ]
+    const gameEvals = await analyzeGame(fens, MOVETIME_MS)
 
     const analysisResults: {
       move_id: string
@@ -92,22 +95,6 @@ export async function POST(request: NextRequest, { params }: Params) {
       is_critical: boolean
     }[] = []
 
-    // Analyze all positions
-    const evals: { evalCp: number; bestMove: string | null; pv: string | null }[] = []
-
-    for (let i = 0; i < moves.length; i++) {
-      const move = moves[i]
-      const result = await analyzePosition(move.fen_before, ANALYSIS_DEPTH)
-      evals.push({ evalCp: result.evalCp, bestMove: result.bestMove, pv: result.pv })
-    }
-
-    // Also analyze the final position
-    if (moves.length > 0) {
-      const lastMove = moves[moves.length - 1]
-      const finalResult = await analyzePosition(lastMove.fen_after, ANALYSIS_DEPTH)
-      evals.push({ evalCp: finalResult.evalCp, bestMove: finalResult.bestMove, pv: finalResult.pv })
-    }
-
     // Compute centipawn loss for each move
     const mistakesToInsert: {
       user_id: string
@@ -123,19 +110,16 @@ export async function POST(request: NextRequest, { params }: Params) {
 
     for (let i = 0; i < moves.length; i++) {
       const move = moves[i]
-      const colorToMove = move.color as 'white' | 'black'
-      const opponentColor = colorToMove === 'white' ? 'black' : 'white'
 
-      // eval_before: from the moving player's perspective (side to move)
-      const evalBefore = evals[i].evalCp
+      // eval_before: Stockfish eval from side-to-move perspective (higher = better for mover)
+      const evalBefore = gameEvals[i]?.evalCp ?? 0
 
-      // eval_after: from opponent's perspective (next position)
-      const rawEvalAfter = evals[i + 1]?.evalCp ?? 0
-      // Convert to moving player's perspective: negate (opponent's good = player's bad)
+      // eval_after: Stockfish eval of next position, from opponent's (new side-to-move) perspective.
+      // Negate to convert back to the moving player's frame of reference.
+      const rawEvalAfter = gameEvals[i + 1]?.evalCp ?? 0
       const evalAfterFromPlayer = -rawEvalAfter
 
-      // centipawn_loss = how much worse than the best continuation
-      // eval_before already represents "value if best move played"
+      // How much worse off the player is vs the best available continuation
       const cpLoss = Math.max(0, evalBefore - evalAfterFromPlayer)
 
       const phase = detectPhase(move.move_number, move.fen_before)
@@ -144,7 +128,7 @@ export async function POST(request: NextRequest, { params }: Params) {
 
       // Convert best_move UCI to SAN
       let bestMoveSan: string | null = null
-      const bestMoveUci = evals[i].bestMove
+      const bestMoveUci = gameEvals[i]?.bestMove ?? null
       if (bestMoveUci && bestMoveUci !== move.uci) {
         try {
           const chess = new Chess(move.fen_before)
@@ -166,8 +150,8 @@ export async function POST(request: NextRequest, { params }: Params) {
         centipawn_loss: Math.round(cpLoss),
         classification,
         game_phase: phase,
-        depth: ANALYSIS_DEPTH,
-        pv: evals[i].pv,
+        depth: MOVETIME_MS,
+        pv: gameEvals[i]?.pv ?? null,
         is_critical: isCritical,
       })
 

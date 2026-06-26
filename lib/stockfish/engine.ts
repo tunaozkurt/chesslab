@@ -5,7 +5,6 @@ export interface StockfishResult {
   fen: string
   bestMove: string | null
   evalCp: number       // centipawn from side-to-move perspective
-  depth: number
   pv: string | null
 }
 
@@ -35,28 +34,66 @@ function parseInfoLine(line: string): { evalCp: number; pv: string | null } | nu
   return { evalCp, pv: pvMatch ? pvMatch[1].trim() : null }
 }
 
-export async function analyzePosition(
-  fen: string,
-  depth = 16
-): Promise<StockfishResult> {
+/**
+ * Analyzes all positions in a game using a single Stockfish process.
+ * Far faster than spawning a process per position — startup cost paid once.
+ *
+ * @param fens     Ordered list of FEN strings to analyze (fen_before per move + final fen_after)
+ * @param movetime Milliseconds per position (default 100 ms — good balance of speed and accuracy)
+ */
+export async function analyzeGame(
+  fens: string[],
+  movetime = 100
+): Promise<StockfishResult[]> {
+  if (fens.length === 0) return []
+
   return new Promise((resolve, reject) => {
     const proc: ChildProcess = spawn(process.execPath, [STOCKFISH_PATH], {
       stdio: ['pipe', 'pipe', 'ignore'],
     })
 
-    let bestEval = 0
-    let bestPv: string | null = null
-    let bestMove: string | null = null
+    const results: StockfishResult[] = []
+    let currentIndex = 0
+    let currentBestEval = 0
+    let currentBestPv: string | null = null
+    let currentBestMove: string | null = null
     let settled = false
-    let uciReady = false
+    let initialized = false
 
-    const timeout = setTimeout(() => {
+    // Total budget: 200 s (stays under Vercel's 300 s limit)
+    const totalTimeout = setTimeout(() => {
       if (!settled) {
         settled = true
         proc.kill()
-        resolve({ fen, bestMove, evalCp: bestEval, depth, pv: bestPv })
+        // Fill remaining positions with zero eval so the route can still proceed
+        while (results.length < fens.length) {
+          results.push({ fen: fens[results.length], bestMove: null, evalCp: 0, pv: null })
+        }
+        resolve(results)
       }
-    }, 8000)
+    }, 200_000)
+
+    function resetCurrent() {
+      currentBestEval = 0
+      currentBestPv = null
+      currentBestMove = null
+    }
+
+    function sendNext() {
+      if (currentIndex >= fens.length) {
+        if (!settled) {
+          settled = true
+          clearTimeout(totalTimeout)
+          proc.stdin!.write('quit\n')
+          proc.kill()
+          resolve(results)
+        }
+        return
+      }
+      resetCurrent()
+      proc.stdin!.write(`position fen ${fens[currentIndex]}\n`)
+      proc.stdin!.write(`go movetime ${movetime}\n`)
+    }
 
     proc.stdout!.on('data', (chunk: Buffer) => {
       const lines = chunk.toString().split('\n')
@@ -64,38 +101,41 @@ export async function analyzePosition(
         const trimmed = line.trim()
         if (!trimmed) continue
 
-        // UCI handshake
         if (trimmed === 'uciok') {
+          proc.stdin!.write('setoption name Hash value 16\n')
           proc.stdin!.write('isready\n')
           continue
         }
 
-        if (trimmed === 'readyok' && !uciReady) {
-          uciReady = true
-          proc.stdin!.write(`position fen ${fen}\n`)
-          proc.stdin!.write(`go depth ${depth}\n`)
+        if (trimmed === 'readyok' && !initialized) {
+          initialized = true
+          sendNext()
           continue
         }
 
         if (trimmed.startsWith('info') && (trimmed.includes('score cp') || trimmed.includes('score mate'))) {
           const parsed = parseInfoLine(trimmed)
           if (parsed) {
-            bestEval = parsed.evalCp
-            bestPv = parsed.pv
+            currentBestEval = parsed.evalCp
+            currentBestPv = parsed.pv
           }
+          continue
         }
 
         if (trimmed.startsWith('bestmove')) {
           const m = trimmed.match(/bestmove (\S+)/)
-          bestMove = m ? m[1] : null
-          if (bestMove === '(none)') bestMove = null
+          currentBestMove = m ? m[1] : null
+          if (currentBestMove === '(none)') currentBestMove = null
 
-          if (!settled) {
-            settled = true
-            clearTimeout(timeout)
-            proc.kill()
-            resolve({ fen, bestMove, evalCp: bestEval, depth, pv: bestPv })
-          }
+          results.push({
+            fen: fens[currentIndex],
+            bestMove: currentBestMove,
+            evalCp: currentBestEval,
+            pv: currentBestPv,
+          })
+
+          currentIndex++
+          sendNext()
         }
       }
     })
@@ -103,12 +143,12 @@ export async function analyzePosition(
     proc.on('error', (err) => {
       if (!settled) {
         settled = true
-        clearTimeout(timeout)
+        clearTimeout(totalTimeout)
         reject(err)
       }
     })
 
-    // Start UCI handshake — position/go are sent after readyok
+    // Kick off UCI handshake — position/go commands follow after readyok
     proc.stdin!.write('uci\n')
   })
 }
@@ -125,7 +165,6 @@ export function classifyLoss(cpLoss: number): 'best' | 'excellent' | 'good' | 'i
 export function detectPhase(moveNumber: number, fen: string): 'opening' | 'middlegame' | 'endgame' {
   if (moveNumber <= 10) return 'opening'
 
-  // Count pieces on board from FEN
   const piecePart = fen.split(' ')[0]
   let pieceCount = 0
   let hasQueens = false
@@ -141,7 +180,6 @@ export function detectPhase(moveNumber: number, fen: string): 'opening' | 'middl
   return 'middlegame'
 }
 
-// Normalize eval to always be from White's perspective (centipawns)
 export function evalFromWhite(evalCp: number, colorToMove: 'white' | 'black'): number {
   return colorToMove === 'white' ? evalCp : -evalCp
 }
