@@ -14,7 +14,7 @@ import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
 import {
   ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  AlertTriangle, Zap, Brain, CheckCircle2, XCircle, Loader2, Sparkles,
+  AlertTriangle, Zap, Brain, CheckCircle2, XCircle, Loader2, Sparkles, RefreshCw,
 } from 'lucide-react'
 import {
   classificationColor, classificationLabel, classificationIcon,
@@ -133,7 +133,11 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
     }
   }, [gameStatus, game.id])
 
-  async function startAnalysis() {
+  async function startAnalysis(reanalyze = false) {
+    if (reanalyze) {
+      setEngineAnalysis([])
+      setMistakes([])
+    }
     setAnalyzing(true)
     setAnalysisProgress(0)
     setGameStatus('in_progress')
@@ -184,6 +188,27 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
     ? Math.round(engineAnalysis.reduce((s, a) => s + (a.centipawn_loss ?? 0), 0) / engineAnalysis.length)
     : null
 
+  function cpLossToAccuracy(avgCp: number): number {
+    return Math.max(0, Math.min(100,
+      Math.round(103.1668 * Math.exp(-0.04354 * avgCp) - 3.1669 + 1)
+    ))
+  }
+
+  const userColor = game.user_color ?? 'white'
+  const oppColor = userColor === 'white' ? 'black' : 'white'
+  const userMoveIds = new Set(moves.filter(m => m.color === userColor).map(m => m.id))
+  const oppMoveIds = new Set(moves.filter(m => m.color === oppColor).map(m => m.id))
+  const userAnalysis = engineAnalysis.filter(a => userMoveIds.has(a.move_id))
+  const oppAnalysis = engineAnalysis.filter(a => oppMoveIds.has(a.move_id))
+  const userAvgCp = userAnalysis.length
+    ? userAnalysis.reduce((s, a) => s + (a.centipawn_loss ?? 0), 0) / userAnalysis.length
+    : null
+  const oppAvgCp = oppAnalysis.length
+    ? oppAnalysis.reduce((s, a) => s + (a.centipawn_loss ?? 0), 0) / oppAnalysis.length
+    : null
+  const userAccuracy = userAvgCp !== null ? cpLossToAccuracy(userAvgCp) : null
+  const oppAccuracy = oppAvgCp !== null ? cpLossToAccuracy(oppAvgCp) : null
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -208,7 +233,7 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
         {/* Analysis button / status */}
         {gameStatus === 'pending' && (
           <Button
-            onClick={startAnalysis}
+            onClick={() => startAnalysis()}
             disabled={analyzing}
             className="bg-blue-600 hover:bg-blue-500 text-white gap-2"
           >
@@ -226,13 +251,25 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
           </div>
         )}
         {gameStatus === 'completed' && (
-          <div className="flex items-center gap-2 text-emerald-400 text-sm">
-            <CheckCircle2 className="w-4 h-4" />
-            Analiz tamamlandı
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-emerald-400 text-sm">
+              <CheckCircle2 className="w-4 h-4" />
+              Analiz tamamlandı
+            </div>
+            <Button
+              onClick={() => startAnalysis(true)}
+              disabled={analyzing}
+              variant="outline"
+              size="sm"
+              className="border-zinc-700 text-zinc-400 hover:text-white hover:bg-zinc-800 gap-1.5"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Yeniden Analiz Et
+            </Button>
           </div>
         )}
         {gameStatus === 'failed' && (
-          <Button onClick={startAnalysis} variant="outline" size="sm" className="border-red-500/50 text-red-400 gap-2">
+          <Button onClick={() => startAnalysis()} variant="outline" size="sm" className="border-red-500/50 text-red-400 gap-2">
             <XCircle className="w-4 h-4" /> Tekrar dene
           </Button>
         )}
@@ -240,7 +277,29 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
 
       {/* Analysis Summary Bar */}
       {gameStatus === 'completed' && engineAnalysis.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-3">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
+            <p className={cn(
+              'text-xl font-bold',
+              userAccuracy !== null && userAccuracy >= 85 ? 'text-emerald-400'
+              : userAccuracy !== null && userAccuracy >= 70 ? 'text-yellow-400'
+              : 'text-orange-400'
+            )}>
+              {userAccuracy !== null ? `${userAccuracy}%` : '—'}
+            </p>
+            <p className="text-zinc-500 text-xs">Senin Doğruluğun</p>
+          </div>
+          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
+            <p className={cn(
+              'text-xl font-bold',
+              oppAccuracy !== null && oppAccuracy >= 85 ? 'text-emerald-400'
+              : oppAccuracy !== null && oppAccuracy >= 70 ? 'text-yellow-400'
+              : 'text-orange-400'
+            )}>
+              {oppAccuracy !== null ? `${oppAccuracy}%` : '—'}
+            </p>
+            <p className="text-zinc-500 text-xs">Rakip Doğruluğu</p>
+          </div>
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
             <p className="text-red-400 text-xl font-bold">{blunders.length}</p>
             <p className="text-zinc-500 text-xs">Blunder ??</p>
@@ -252,10 +311,6 @@ export function GameViewer({ game, moves, engineAnalysis: initialAnalysis, mista
           <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
             <p className="text-yellow-400 text-xl font-bold">{inaccuracies.length}</p>
             <p className="text-zinc-500 text-xs">Yanlışlık ?!</p>
-          </div>
-          <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3 text-center">
-            <p className="text-blue-400 text-xl font-bold">{avgCpLoss ?? '—'}</p>
-            <p className="text-zinc-500 text-xs">Ort. CP Kayıp</p>
           </div>
         </div>
       )}

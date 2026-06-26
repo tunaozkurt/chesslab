@@ -42,6 +42,23 @@ export async function POST(request: NextRequest, { params }: Params) {
     .eq('id', gameId)
 
   try {
+    // Clean up previous analysis data (for re-analysis)
+    await supabase.from('engine_analysis').delete().eq('game_id', gameId)
+
+    const { data: oldMistakes } = await supabase
+      .from('mistakes')
+      .select('id')
+      .eq('game_id', gameId)
+
+    if (oldMistakes && oldMistakes.length > 0) {
+      await supabase
+        .from('study_items')
+        .delete()
+        .eq('reference_table', 'mistakes')
+        .in('reference_id', oldMistakes.map(m => m.id))
+      await supabase.from('mistakes').delete().eq('game_id', gameId)
+    }
+
     // Fetch moves
     const { data: moves } = await supabase
       .from('moves')
